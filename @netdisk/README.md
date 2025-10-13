@@ -197,7 +197,7 @@
   - 建议 ops：`share_ticket`、`captcha_verify`
 - 账户信息扩展（次优先级）
   - 能力：用户信息详情、空间使用明细
-  - 建议 ops：`user_detail`、`space_usage`
+  - 建议 ops：`user_info`、`quota_usage`
 - 批处理与编排（次优先级）
   - 能力：异步批处理、状态轮询、失败重试策略
   - 建议 ops：`batch_submit`、`batch_status`
