@@ -10,6 +10,10 @@ from app.models.user import User
 from app.services.token_store import TokenStore
 from app.services.ws_manager import manager
 from app.core.config import get_settings
+from app.services.mcp_client import NetdiskClient
+import secrets
+import hashlib
+import uuid
 
 
 router = APIRouter(prefix="/oauth", tags=["oauth"])
@@ -258,4 +262,144 @@ def user_token_upsert(
     store = TokenStore(db)
     store.save_user_token(current.id, access_token, refresh_token, expires_in)
     return JSONResponse({"status": "ok"})
+
+
+# ---- 自动扫码授权（无需JWT认证） ----
+@router.post("/device/start_auto")
+def device_start_auto(db: Session = Depends(get_db)) -> JSONResponse:
+    """启动自动授权流程，无需JWT认证"""
+    store = TokenStore(db)
+    data = store.start_device_code()
+    # 规范返回：提供前端可直接用于扫码的 URL，避免误用 verification_url 造成二次二维码
+    scan_qr_url = data.get("qrcode_url") or data.get("verification_url_qrcode")
+    if not scan_qr_url:
+        # 官方未返回二维码直链时，生成一个图片直链（编码 verification_url + user_code + display=mobile）
+        from urllib.parse import urlencode, quote
+        verification_url = data.get("verification_url") or ""
+        user_code = data.get("user_code") or ""
+        # 将 user_code 和 display=mobile 作为 query 便于移动端展示
+        target = verification_url
+        if verification_url:
+            sep = "&" if ("?" in verification_url) else "?"
+            if user_code:
+                target = f"{verification_url}{sep}user_code={quote(user_code)}&display=mobile"
+            else:
+                target = f"{verification_url}{sep}display=mobile"
+        if target:
+            # 使用公共二维码服务生成图片直链
+            params = urlencode({"size": "300x300", "data": target})
+            scan_qr_url = f"https://api.qrserver.com/v1/create-qr-code/?{params}"
+        else:
+            scan_qr_url = None
+    # 额外提供移动端友好回调页链接（非二维码）：verification_url + display=mobile [+ user_code]
+    verification_url = data.get("verification_url") or ""
+    verification_url_mobile = None
+    if verification_url:
+        from urllib.parse import quote
+        sep = "&" if ("?" in verification_url) else "?"
+        if data.get("user_code"):
+            verification_url_mobile = f"{verification_url}{sep}user_code={quote(data.get('user_code'))}&display=mobile"
+        else:
+            verification_url_mobile = f"{verification_url}{sep}display=mobile"
+
+    normalized = {
+        **data,
+        "scan_qr_url": scan_qr_url,
+        "verification_url_mobile": verification_url_mobile,
+    }
+    return JSONResponse(normalized)
+
+
+@router.post("/device/poll_auto")
+def device_poll_auto(device_code: str, device_fingerprint: str = None, db: Session = Depends(get_db)) -> JSONResponse:
+    """轮询自动授权状态，自动创建用户账号"""
+    store = TokenStore(db)
+    
+    try:
+        # 轮询授权状态
+        data = store.poll_device_token(device_code)
+        
+        if not isinstance(data, dict) or not data.get("access_token"):
+            return JSONResponse({
+                "status": "pending" if data else "error",
+                "error": data.get("error") if isinstance(data, dict) else "授权未完成"
+            })
+        
+        # 获取百度网盘用户信息
+        access_token = data.get("access_token")
+        client = NetdiskClient(access_token=access_token)
+        user_info = client.get_user_info()
+        
+        if user_info.get("errno") != 0:
+            return JSONResponse({
+                "status": "error",
+                "error": f"获取用户信息失败: {user_info.get('errmsg', '未知错误')}"
+            })
+        
+        # 提取用户信息
+        uk = user_info.get("uk")
+        baidu_name = user_info.get("baidu_name", "")
+        netdisk_name = user_info.get("netdisk_name", "")
+        avatar_url = user_info.get("avatar_url", "")
+        vip_type = user_info.get("vip_type", 0)
+        
+        if not uk:
+            return JSONResponse({
+                "status": "error",
+                "error": "无法获取用户ID"
+            })
+        
+        # 生成设备指纹（如果未提供）
+        if not device_fingerprint:
+            device_fingerprint = str(uuid.uuid4())
+        
+        # 创建用户名：uk + 设备指纹
+        username = f"user_{uk}_{hashlib.md5(device_fingerprint.encode()).hexdigest()[:8]}"
+        
+        # 检查用户是否已存在
+        existing_user = db.query(User).filter(User.username == username).first()
+        
+        if existing_user:
+            # 用户已存在，更新token
+            user_id = existing_user.id
+            store.save_user_token(user_id, access_token, data.get("refresh_token"), data.get("expires_in"))
+        else:
+            # 创建新用户（字段白名单：仅使用 User 模型实际存在字段）
+            password = secrets.token_urlsafe(16)  # 随机密码
+            new_user = User(
+                username=username,
+                password_hash=hashlib.sha256(password.encode()).hexdigest(),
+            )
+            db.add(new_user)
+            db.commit()
+            db.refresh(new_user)
+            user_id = new_user.id
+            
+            # 保存token
+            store.save_user_token(user_id, access_token, data.get("refresh_token"), data.get("expires_in"))
+        
+        # 生成JWT token
+        from app.core.security import create_access_token
+        jwt_token = create_access_token(subject=str(user_id))
+        
+        return JSONResponse({
+            "status": "success",
+            "user_id": user_id,
+            "username": username,
+            "jwt_token": jwt_token,
+            "baidu_token": access_token,
+            "user_info": {
+                "uk": uk,
+                "baidu_name": baidu_name,
+                "netdisk_name": netdisk_name,
+                "avatar_url": avatar_url,
+                "vip_type": vip_type
+            }
+        })
+        
+    except Exception as e:
+        return JSONResponse({
+            "status": "error",
+            "error": f"处理授权失败: {str(e)}"
+        })
 

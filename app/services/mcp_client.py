@@ -24,6 +24,8 @@ from app.core.db import SessionLocal
 class NetdiskClient:
     def __init__(self, access_token: Optional[str] = None, user_id: Optional[int] = None, mode: str = "user") -> None:
         settings = get_settings()
+        # 记录令牌模式，便于下游调试输出
+        self._token_mode = mode
         if mode == "public":
             # 仅使用服务账户令牌，不再回退环境变量
             with SessionLocal() as db:
@@ -44,6 +46,27 @@ class NetdiskClient:
             api = UserinfoApi(api_client)
             resp = api.apiquota(access_token=self._access_token)
             return resp.to_dict() if hasattr(resp, "to_dict") else dict(resp)
+
+    def get_user_info(self) -> Dict[str, Any]:
+        """获取百度网盘用户信息"""
+        import requests
+        
+        url = "https://pan.baidu.com/rest/2.0/xpan/nas"
+        params = {
+            "method": "uinfo",
+            "access_token": self._access_token,
+            "vip_version": "v2"
+        }
+        
+        try:
+            response = requests.get(url, params=params)
+            response.raise_for_status()
+            return response.json()
+        except requests.exceptions.RequestException as e:
+            return {
+                "errno": -1,
+                "errmsg": f"获取用户信息失败: {str(e)}"
+            }
 
     def list_files(self, dir_path: str = "/", limit: int = 100, order: str = "time", desc: int = 1) -> Dict[str, Any]:
         with ApiClient(self._config) as api_client:
@@ -134,10 +157,21 @@ class NetdiskClient:
     def create_share_link(self, fsid_list: list[int] | list[str] | str, period: int, pwd: str, remark: str | None = None, ticket: dict | None = None) -> Dict[str, Any]:
         settings = get_settings()
         appid = settings.baidu_app_id or ""
+        # 基础参数校验（提前拦截明显错误）
+        try:
+            import re
+            if period not in {1, 7, 30}:
+                return {"errno": -40001, "errmsg": "invalid period, must be 1/7/30", "period": period}
+            if not isinstance(pwd, str) or not re.fullmatch(r"[a-z0-9]{4}", pwd or ""):
+                return {"errno": -40002, "errmsg": "invalid pwd, must be 4 chars [a-z0-9]", "pwd": pwd}
+        except Exception:
+            pass
+
         if isinstance(fsid_list, (list, tuple)):
             fsid_list_str = json.dumps([str(x) for x in fsid_list])
         else:
             fsid_list_str = str(fsid_list)
+
         # doc requires: POST form to https://pan.baidu.com/apaas/1.0/share/set?product=netdisk&appid=...&access_token=...
         query = urllib.parse.urlencode({
             "product": "netdisk",
@@ -154,14 +188,51 @@ class NetdiskClient:
             form["remark"] = remark
         if ticket:
             form["ticket"] = json.dumps(ticket, ensure_ascii=False)
+
         data = urllib.parse.urlencode(form).encode()
         req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/x-www-form-urlencoded"})
-        with urllib.request.urlopen(req, timeout=20) as resp:
-            body = resp.read().decode("utf-8")
+
+        try:
+            with urllib.request.urlopen(req, timeout=20) as resp:
+                body = resp.read().decode("utf-8")
+                try:
+                    parsed = json.loads(body)
+                except Exception:
+                    parsed = {"raw": body}
+                # 正常 2xx 时直接返回百度结构
+                return parsed
+        except Exception as e:
+            # 若为 HTTPError，读取响应体，透传百度原始错误以便定位（如 MAC check failed / errno）
             try:
-                return json.loads(body)
+                from urllib.error import HTTPError
+                if isinstance(e, HTTPError) and e.fp is not None:
+                    err_body = e.fp.read().decode("utf-8", errors="ignore")
+                    try:
+                        err_parsed = json.loads(err_body)
+                    except Exception:
+                        err_parsed = {"errmsg": err_body}
+                    # 附带调试关键信息（不包含 token），帮助确认是否为 appid/令牌不匹配
+                    err_parsed.setdefault("errno", -1)
+                    err_parsed.setdefault("errmsg", str(e))
+                    # 解析 fsid_list 长度时避免再次抛错
+                    fs_len = 0
+                    try:
+                        parsed_fs = json.loads(fsid_list_str) if fsid_list_str and fsid_list_str.strip().startswith("[") else None
+                        if isinstance(parsed_fs, list):
+                            fs_len = len(parsed_fs)
+                    except Exception:
+                        fs_len = 0
+                    err_parsed["__debug"] = {
+                        "appid": appid,
+                        "token_mode": getattr(self, "_token_mode", "unknown"),
+                        "fsid_list_len": fs_len,
+                        "http_status": getattr(e, "code", None),
+                    }
+                    return err_parsed
             except Exception:
-                return {"raw": body}
+                pass
+            # 兜底：无法读取响应体时，返回通用错误
+            return {"errno": -1, "errmsg": str(e)}
 
     # ---- Convenience filters (videos / bt / category summary / recent) ----
     def list_videos(self, path: str = "/", recursion: int = 0, start: int = 0, limit: int = 100, order: str = "time", desc: int = 1) -> Dict[str, Any]:

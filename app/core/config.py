@@ -20,6 +20,7 @@ class Settings(BaseSettings):
 
     # Database
     sqlite_path: str = "/opt/web/app_data/app.sqlite3"
+    data_dir: str = "/opt/web/data"
 
     # WebSocket
     ws_heartbeat_timeout_seconds: int = 35
@@ -46,5 +47,9 @@ class Settings(BaseSettings):
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
     return Settings()  # type: ignore[call-arg]
+
+
+# 全局设置实例
+settings = get_settings()
 
 

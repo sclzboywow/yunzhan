@@ -72,3 +72,8 @@ from app.api.oauth import router as oauth_router
 
 app.include_router(mcp_router)
 app.include_router(oauth_router)
+
+# ---- Files wiring ----
+from app.api.files import router as files_router
+
+app.include_router(files_router)

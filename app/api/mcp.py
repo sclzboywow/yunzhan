@@ -93,6 +93,8 @@ ALLOWED_OPS: set[str] = {
     "file_metas",
     "download_links",
     "share_create",
+    # 下载票据
+    "download_ticket",
     # 离线下载
     "offline_add",
     "offline_status",
@@ -267,6 +269,55 @@ def _exec_with_client(op: str, args: dict, client) -> dict:
         remark = args.get("remark")
         ticket = args.get("ticket")
         return client.create_share_link(fsid_list=fsid_list, period=period, pwd=pwd, remark=remark, ticket=ticket)
+    if op == "download_ticket":
+        # 允许通过 fsid 或直接传 dlink 申请票据
+        import time as _time
+        from app.core.config import settings
+        try:
+            import jwt as _jwt
+        except Exception:
+            return {"status": "error", "error": "pyjwt_not_installed"}
+
+        dlink: str | None = args.get("dlink")
+        fsid = args.get("fsid")
+        ttl_seconds = int(args.get("ttl", 300))  # 默认5分钟
+
+        if not dlink and not fsid:
+            return {"status": "error", "error": "missing_dlink_or_fsid"}
+
+        # 若提供 fsid，则用当前 client 获取 dlink（默认走公共态由调用方控制）
+        if not dlink and fsid is not None:
+            try:
+                fsids = [int(fsid)]
+            except Exception:
+                try:
+                    fsids = [int(str(fsid))]
+                except Exception:
+                    return {"status": "error", "error": "invalid_fsid"}
+            metas = client.download_links(fsids)
+            # 兼容不同返回结构
+            items = metas.get("list") or metas.get("data", {}).get("list") or []
+            if not items:
+                return {"status": "error", "error": "dlink_not_found"}
+            first = items[0] if isinstance(items, list) else items
+            dlink = first.get("dlink") if isinstance(first, dict) else None
+            if not dlink:
+                return {"status": "error", "error": "dlink_not_found"}
+
+        now = int(_time.time())
+        payload = {
+            "typ": "bd.dl.ticket",
+            "dlink": dlink,
+            "iat": now,
+            "exp": now + ttl_seconds,
+            # 可扩展字段，如文件名、fsid 等
+        }
+        token = _jwt.encode(payload, settings.jwt_secret_key, algorithm=settings.jwt_algorithm)
+        return {
+            "status": "ok",
+            "ticket": token,
+            "expires_in": ttl_seconds,
+        }
     
     # 离线下载功能
     if op == "offline_add":
@@ -300,7 +351,26 @@ def public_exec(payload: dict, current: User = Depends(get_current_user)) -> JSO
     except NotImplementedError:
         return JSONResponse({"status": "error", "error": "op_not_implemented", "op": op}, status_code=400)
     except Exception as e:
-        return JSONResponse({"status": "error", "error": str(e)}, status_code=200)
+        # 尝试从 HTTPError 中提取原始响应体，便于定位（如 MAC check failed、errno 等）
+        try:
+            from urllib.error import HTTPError
+            if isinstance(e, HTTPError) and e.fp is not None:
+                body = e.fp.read().decode("utf-8", errors="ignore")
+                try:
+                    import json as _json
+                    parsed = _json.loads(body)
+                except Exception:
+                    parsed = {"errmsg": body}
+                parsed.setdefault("errno", -1)
+                parsed.setdefault("errmsg", str(e))
+                parsed["__debug"] = {
+                    "op": op,
+                    "token_mode": "public",
+                }
+                return JSONResponse({"status": "error", "error": parsed.get("errmsg"), "data": parsed}, status_code=200)
+        except Exception:
+            pass
+        return JSONResponse({"status": "error", "error": str(e), "data": {"__debug": {"op": op, "token_mode": "public"}}}, status_code=200)
 
 
 @router.post("/user/exec")
