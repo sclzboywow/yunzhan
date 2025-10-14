@@ -1,8 +1,23 @@
 from fastapi import Depends, FastAPI
 from fastapi.responses import JSONResponse, RedirectResponse, Response
+from fastapi.middleware.cors import CORSMiddleware
 import sys, os
 
 app = FastAPI(title="NetDisk Backend", version="0.1.0")
+
+# CORS配置 - 允许PySide6桌面应用访问
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:*",       # 本地所有端口
+        "http://127.0.0.1:*",      # 本地IP所有端口
+        "file://*",                # 本地文件协议
+        "*",                      # 开发环境允许所有来源
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 @app.get("/", include_in_schema=False)
 def _root() -> RedirectResponse:

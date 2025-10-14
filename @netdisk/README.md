@@ -98,8 +98,9 @@
 常见错误：422 json_invalid → 请求体不是 JSON，而是把整段 curl 命令贴入了 body；请仅发送 JSON。
 
 ### MCP/网盘客户端
-- 用户态：后端通过 `NetdiskClient(user_id=<id>, mode="user")` 自动获取并刷新用户 access_token。
-- 公共态：后端通过 `NetdiskClient(mode="public")` 仅使用加密落库的服务 token（不再回退 `APP_BAIDU_ACCESS_TOKEN`）。
+- **用户态**：后端通过 `NetdiskClient(user_id=<id>, mode="user")` 自动获取并刷新用户百度token，代理执行前端请求。
+- **公共态**：后端通过 `NetdiskClient(mode="public")` 仅使用加密落库的服务token（不再回退 `APP_BAIDU_ACCESS_TOKEN`）。
+- **前端无MCP**：前端仅调用后端API，不直接与百度网盘API交互。
 
 #### Token 刷新与一致性保证
 - 服务 token 自动刷新：在过期前 30 天预刷新；失败时返回旧 access 由上层兜底。
@@ -108,12 +109,123 @@
 - SQLite WAL：启用 WAL（写前日志）与 `synchronous=NORMAL` 提升并发与耐久性。
 - 单条服务记录：仅维护一条 `is_service=1` 记录，刷新时“查到则更新，否则插入”。
 
+### 前端扫码授权完整流程
+
+#### 📱 **Device Flow 扫码授权流程**
+
+**1. 前端启动扫码**
+```javascript
+// 前端调用后端接口获取二维码
+const response = await fetch('/oauth/device/start', {
+  method: 'POST',
+  headers: {
+    'Authorization': `Bearer ${userJWT}`,  // 软件JWT，用于后端鉴权
+    'Content-Type': 'application/json'
+  }
+});
+
+const data = await response.json();
+// 返回：二维码URL、用户码、设备码等
+```
+
+**2. 用户扫码授权**
+- 用户使用百度网盘APP扫描二维码
+- 用户在APP中确认授权
+- 百度网盘服务器处理授权请求
+
+**3. 后端获取token**
+```python
+# 后端轮询百度网盘API获取真实token
+def device_poll(device_code: str):
+    data = store.poll_device_token(device_code)  # 调用百度API
+    access = data.get("access_token")  # 百度网盘真实token
+    refresh = data.get("refresh_token")  # 百度网盘刷新token
+    expires_in = data.get("expires_in")  # 过期时间
+```
+
+**4. 后端返回token**
+```python
+# 后端将百度token返回给前端
+return JSONResponse({
+    "status": "ok",
+    "data": {
+        "access_token": access,      # 百度网盘access_token
+        "refresh_token": refresh,    # 百度网盘refresh_token
+        "expires_in": expires_in     # 过期时间
+    }
+})
+```
+
+**5. 前端保存token**
+```javascript
+// 前端加密保存百度token到本地
+if (result.success) {
+    const encryptedAccess = encrypt(result.data.access_token);
+    const encryptedRefresh = encrypt(result.data.refresh_token);
+    
+    localStorage.setItem('baidu_access_token', encryptedAccess);
+    localStorage.setItem('baidu_refresh_token', encryptedRefresh);
+    localStorage.setItem('baidu_expires_in', result.data.expires_in);
+}
+```
+
+**6. 后端也保存token**
+```python
+# 后端保存用户token用于鉴权隔离
+if access:
+    store.save_user_token(current.id, access, refresh, expires_in)
+    # 用于后端代理执行：POST /mcp/user/exec
+```
+
+**7. 前端使用token**
+```javascript
+// 前端通过后端API进行网盘操作
+const response = await fetch('/mcp/user/exec', {
+    method: 'POST',
+    headers: {
+        'Authorization': `Bearer ${userJWT}`,  // 软件JWT
+        'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+        op: 'quota',  // 百度网盘操作
+        args: {}
+    })
+});
+```
+
+#### 🔄 **前端使用模式**
+
+**前端通过后端API调用**
+- 前端调用后端接口：`POST /mcp/user/exec`
+- 后端使用保存的百度token代理执行
+- 前端无需直接调用百度API
+- 优势：统一管理，便于监控和审计，前端实现简单
+
+#### 🔧 **API接口说明**
+
+**Device Flow 接口：**
+- `POST /oauth/device/start` - 启动设备授权，返回二维码
+- `POST /oauth/device/poll?device_code=xxx` - 轮询授权状态，返回百度token
+
+**后端代理接口：**
+- `POST /mcp/user/exec` - 后端使用用户百度token代理执行
+- `POST /mcp/public/exec` - 后端使用服务百度token代理执行
+
+**Token管理接口：**
+- `POST /oauth/user/token/upsert` - 前端上报百度token给后端
+- `GET /oauth/token` - 查询用户token状态（脱敏）
+
 ### 前后端协作与多用户
-- 前端无 MCP 能力时，统一由后端代理执行：
-  - 用户态：`POST /mcp/user/exec`（携带用户 JWT），后端按当前用户从库取 token 并转发。
-  - 公共态：`POST /mcp/public/exec`（走服务 token）。
-- 多前端/多用户：每个用户的 Baidu token 独立加密存储；公共操作共用服务 token，刷新由全局锁串行化。
-- 回调页（移动端友好）：`GET /oauth/callback` 根据 `state` 渲染成功/失败提示，不在 URL 透传第三方 token。
+- **双重token机制**：
+  - 软件JWT：用于后端鉴权，标识用户身份
+  - 百度token：后端保存，用于代理调用百度API
+- **前端模式**：前端无MCP能力，仅调用后端API
+- **后端代理**：后端使用保存的百度token代理执行所有百度API调用
+- **多用户隔离**：每个用户的百度token独立加密存储
+
+#### 📋 **完整的前端集成示例**
+
+
 
 ### 新接口（前端→后端上报用户 Token）
 `POST /oauth/user/token/upsert`
@@ -234,6 +346,9 @@
   - `upload_text` - 文本上传 ✅
   - `upload_url` - URL上传 ✅
   - `upload_local` - 本地文件上传 ✅
+  - `upload_batch_local` - 批量本地文件上传 ✅
+  - `upload_batch_url` - 批量URL文件上传 ✅
+  - `upload_batch_text` - 批量文本内容上传 ✅
 
 - **离线下载功能**：
   - `offline_add` - 添加离线下载任务 ✅（API接口已实现，需要权限配置）
@@ -257,7 +372,12 @@
 | **文件上传** | 预上传（precreate） | ✅ 已实现 | 通过 `upload_local` 自动处理 |
 | | 分片上传（upload） | ✅ 已实现 | 自动分片上传，支持大文件 |
 | | 创建文件（create） | ✅ 已实现 | 自动合并分片完成上传 |
-| **文件下载** | 获取下载链接 | ✅ 已实现 | `download_links` 接口 |
+| **上传功能** | 文本上传 | ✅ 已实现 | `upload_text` 接口 |
+| | URL上传 | ✅ 已实现 | `upload_url` 接口 |
+| | 本地文件上传 | ✅ 已实现 | `upload_local` 接口 |
+| | 批量本地文件上传 | ✅ 已实现 | `upload_batch_local` 接口 |
+| | 批量URL文件上传 | ✅ 已实现 | `upload_batch_url` 接口 |
+| | 批量文本内容上传 | ✅ 已实现 | `upload_batch_text` 接口 |
 | | 下载文件 | ✅ 已实现 | 通过下载链接获取文件 |
 | **文件管理** | 获取文件列表 | ✅ 已实现 | `list_files` 等接口 |
 | | 删除文件 | ✅ 已实现 | `delete` 接口 |
@@ -276,7 +396,113 @@
 | **用户信息** | 配额查询 | ✅ 已实现 | `quota` 接口 |
 | | 用户信息 | ✅ 已实现 | 通过认证系统实现 |
 
-**实现完成度：98%** - 核心功能已全部实现，仅分享管理功能需要完善
+**实现完成度：99%** - 核心功能已全部实现，包括批量上传功能，仅分享管理功能需要完善
+
+### 批量上传功能详细说明
+
+#### 📤 **批量上传功能**
+
+**1. 批量本地文件上传 (`upload_batch_local`)**
+```bash
+curl -X POST "http://127.0.0.1:8000/mcp/public/exec" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $TOKEN" \
+  -d '{
+    "op": "upload_batch_local",
+    "args": {
+      "file_list": [
+        {
+          "local_path": "/path/to/file1.txt",
+          "remote_path": "/uploads/file1.txt"
+        },
+        {
+          "local_path": "/path/to/file2.jpg",
+          "remote_path": "/uploads/file2.jpg"
+        }
+      ],
+      "max_concurrent": 3
+    }
+  }'
+```
+
+**2. 批量URL文件上传 (`upload_batch_url`)**
+```bash
+curl -X POST "http://127.0.0.1:8000/mcp/public/exec" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $TOKEN" \
+  -d '{
+    "op": "upload_batch_url",
+    "args": {
+      "url_list": [
+        {
+          "url": "https://example.com/file1.pdf",
+          "dir_path": "/downloads",
+          "filename": "document1.pdf"
+        },
+        {
+          "url": "https://example.com/file2.zip",
+          "dir_path": "/downloads",
+          "filename": "archive2.zip"
+        }
+      ],
+      "max_concurrent": 3
+    }
+  }'
+```
+
+**3. 批量文本内容上传 (`upload_batch_text`)**
+```bash
+curl -X POST "http://127.0.0.1:8000/mcp/public/exec" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $TOKEN" \
+  -d '{
+    "op": "upload_batch_text",
+    "args": {
+      "text_list": [
+        {
+          "content": "这是第一个文本文件的内容",
+          "dir_path": "/notes",
+          "filename": "note1.txt"
+        },
+        {
+          "content": "这是第二个文本文件的内容",
+          "dir_path": "/notes",
+          "filename": "note2.txt"
+        }
+      ],
+      "max_concurrent": 3
+    }
+  }'
+```
+
+**功能特点：**
+- ✅ **并发控制** - 支持自定义最大并发数（默认3个）
+- ✅ **错误处理** - 单个文件失败不影响其他文件上传
+- ✅ **详细结果** - 返回成功/失败统计和详细信息
+- ✅ **线程安全** - 使用线程池进行并发处理
+- ✅ **资源管理** - 自动清理临时文件和资源
+
+**返回格式：**
+```json
+{
+  "status": "completed",
+  "total": 2,
+  "success": 1,
+  "failed": 1,
+  "results": [
+    {
+      "file": {"local_path": "/path/to/file1.txt", "remote_path": "/uploads/file1.txt"},
+      "result": {"errno": 0, "fs_id": 123456789}
+    }
+  ],
+  "errors": [
+    {
+      "file": {"local_path": "/path/to/file2.txt", "remote_path": "/uploads/file2.txt"},
+      "result": {"status": "error", "error": "file_not_found"}
+    }
+  ]
+}
+```
 
 ### 离线下载功能详细说明
 
@@ -487,6 +713,4 @@ POST /mcp/public/exec
 
 热重载
 
-cd /opt/web
-. .venv/bin/activate
-uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload --reload-dir app --reload-dir @netdisk
+cd /opt/web && . .venv/bin/activate && APP_ENC_MASTER_KEY=IExFkb0be89F8dmUFK4pLTBoIwjFi8nv APP_ADMIN_SECRET=y2oW3usi55pHCMvHIy3sEKqe uvicorn app.main:app --host 0.0.0.0 --port 8000  

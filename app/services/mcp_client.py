@@ -307,6 +307,173 @@ class NetdiskClient:
             except Exception:
                 pass
 
+    def upload_batch_local(self, file_list: list[dict], max_concurrent: int = 3) -> Dict[str, Any]:
+        """批量上传本地文件
+        
+        Args:
+            file_list: 文件列表，每个元素包含 {"local_path": str, "remote_path": str}
+            max_concurrent: 最大并发数，默认3个
+        """
+        import concurrent.futures
+        import threading
+        
+        results = []
+        errors = []
+        
+        def upload_single_file(file_info: dict) -> dict:
+            try:
+                local_path = file_info.get("local_path", "")
+                remote_path = file_info.get("remote_path", "")
+                if not local_path or not remote_path:
+                    return {"status": "error", "error": "missing_paths", "file": file_info}
+                
+                result = self.upload_local(local_path, remote_path)
+                return {"file": file_info, "result": result}
+            except Exception as e:
+                return {"file": file_info, "result": {"status": "error", "error": str(e)}}
+        
+        # 使用线程池进行并发上传
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_concurrent) as executor:
+            future_to_file = {
+                executor.submit(upload_single_file, file_info): file_info 
+                for file_info in file_list
+            }
+            
+            for future in concurrent.futures.as_completed(future_to_file):
+                file_info = future_to_file[future]
+                try:
+                    result = future.result()
+                    if result["result"].get("status") == "error":
+                        errors.append(result)
+                    else:
+                        results.append(result)
+                except Exception as e:
+                    errors.append({
+                        "file": file_info, 
+                        "result": {"status": "error", "error": str(e)}
+                    })
+        
+        return {
+            "status": "completed",
+            "total": len(file_list),
+            "success": len(results),
+            "failed": len(errors),
+            "results": results,
+            "errors": errors
+        }
+
+    def upload_batch_url(self, url_list: list[dict], max_concurrent: int = 3) -> Dict[str, Any]:
+        """批量上传URL文件
+        
+        Args:
+            url_list: URL列表，每个元素包含 {"url": str, "dir_path": str, "filename": str}
+            max_concurrent: 最大并发数，默认3个
+        """
+        import concurrent.futures
+        
+        results = []
+        errors = []
+        
+        def upload_single_url(url_info: dict) -> dict:
+            try:
+                url = url_info.get("url", "")
+                dir_path = url_info.get("dir_path", "/")
+                filename = url_info.get("filename")
+                
+                if not url:
+                    return {"status": "error", "error": "missing_url", "url_info": url_info}
+                
+                result = self.upload_url(url, dir_path, filename)
+                return {"url_info": url_info, "result": result}
+            except Exception as e:
+                return {"url_info": url_info, "result": {"status": "error", "error": str(e)}}
+        
+        # 使用线程池进行并发上传
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_concurrent) as executor:
+            future_to_url = {
+                executor.submit(upload_single_url, url_info): url_info 
+                for url_info in url_list
+            }
+            
+            for future in concurrent.futures.as_completed(future_to_url):
+                url_info = future_to_url[future]
+                try:
+                    result = future.result()
+                    if result["result"].get("status") == "error":
+                        errors.append(result)
+                    else:
+                        results.append(result)
+                except Exception as e:
+                    errors.append({
+                        "url_info": url_info, 
+                        "result": {"status": "error", "error": str(e)}
+                    })
+        
+        return {
+            "status": "completed",
+            "total": len(url_list),
+            "success": len(results),
+            "failed": len(errors),
+            "results": results,
+            "errors": errors
+        }
+
+    def upload_batch_text(self, text_list: list[dict], max_concurrent: int = 3) -> Dict[str, Any]:
+        """批量上传文本内容
+        
+        Args:
+            text_list: 文本列表，每个元素包含 {"content": str, "dir_path": str, "filename": str}
+            max_concurrent: 最大并发数，默认3个
+        """
+        import concurrent.futures
+        
+        results = []
+        errors = []
+        
+        def upload_single_text(text_info: dict) -> dict:
+            try:
+                content = text_info.get("content", "")
+                dir_path = text_info.get("dir_path", "/")
+                filename = text_info.get("filename")
+                
+                if not content:
+                    return {"status": "error", "error": "missing_content", "text_info": text_info}
+                
+                result = self.upload_text(content, dir_path, filename)
+                return {"text_info": text_info, "result": result}
+            except Exception as e:
+                return {"text_info": text_info, "result": {"status": "error", "error": str(e)}}
+        
+        # 使用线程池进行并发上传
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_concurrent) as executor:
+            future_to_text = {
+                executor.submit(upload_single_text, text_info): text_info 
+                for text_info in text_list
+            }
+            
+            for future in concurrent.futures.as_completed(future_to_text):
+                text_info = future_to_text[future]
+                try:
+                    result = future.result()
+                    if result["result"].get("status") == "error":
+                        errors.append(result)
+                    else:
+                        results.append(result)
+                except Exception as e:
+                    errors.append({
+                        "text_info": text_info, 
+                        "result": {"status": "error", "error": str(e)}
+                    })
+        
+        return {
+            "status": "completed",
+            "total": len(text_list),
+            "success": len(results),
+            "failed": len(errors),
+            "results": results,
+            "errors": errors
+        }
+
     # ---- 离线下载功能 ----
     def offline_add(self, url: str, save_path: str = "/", filename: str | None = None) -> Dict[str, Any]:
         """添加离线下载任务

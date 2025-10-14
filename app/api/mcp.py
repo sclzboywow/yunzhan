@@ -81,6 +81,10 @@ ALLOWED_OPS: set[str] = {
     "upload_local",
     "upload_url",
     "upload_text",
+    # 批量上传
+    "upload_batch_local",
+    "upload_batch_url",
+    "upload_batch_text",
     # 播单/最近
     "playlist",
     "recent",
@@ -190,6 +194,18 @@ def _exec_with_client(op: str, args: dict, client) -> dict:
             dir_path=str(args.get("dir", "/")),
             filename=args.get("filename"),
         )
+    if op == "upload_batch_local":
+        file_list = args.get("file_list", [])
+        max_concurrent = int(args.get("max_concurrent", 3))
+        return client.upload_batch_local(file_list, max_concurrent)
+    if op == "upload_batch_url":
+        url_list = args.get("url_list", [])
+        max_concurrent = int(args.get("max_concurrent", 3))
+        return client.upload_batch_url(url_list, max_concurrent)
+    if op == "upload_batch_text":
+        text_list = args.get("text_list", [])
+        max_concurrent = int(args.get("max_concurrent", 3))
+        return client.upload_batch_text(text_list, max_concurrent)
     if op == "delete":
         return client.fm_delete(
             filelist_json=str(args.get("filelist", "[]")),
