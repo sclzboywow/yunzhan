@@ -1039,10 +1039,17 @@ curl "http://127.0.0.1:8000/reports/public/count?target=<TARGET_ID>"
 sqlite3 /opt/web/app_data/app.sqlite3 "INSERT INTO usage_quota (user_id, day, total_count) SELECT id, date('now'), 0 FROM users WHERE username='user_3238730176_41870c28' AND NOT EXISTS (SELECT 1 FROM usage_quota WHERE user_id=users.id AND day=date('now')); UPDATE usage_quota SET total_count = CASE WHEN total_count >= 10 THEN total_count - 10 ELSE 0 END WHERE user_id = (SELECT id FROM users WHERE username='user_3238730176_41870c28') AND day = date('now');"
 
 
+
+继续处理未填充 MD5
+
+# 首次/全量
+/opt/web/.venv/bin/python /opt/web/scripts/refresh_md5.py --mode public --start-id 1 --limit 1000 --batch-size 50 --state-file /opt/web/.data/md5_refresh.state --resume
+
+# 断点续传（再次执行时省略 --start-id；会自动从 state-file 继续）
+python /opt/web/scripts/refresh_md5.py --mode public --limit 1000 --batch-size 50 --state-file /opt/web/.data/md5_refresh.state --resume
+
+
+
 热重载
 
-cd /opt/web && . .venv/bin/activate && APP_ENC_MASTER_KEY=IExFkb0be89F8dmUFK4pLTBoIwjFi8nv APP_ADMIN_SECRET=y2oW3usi55pHCMvHIy3sEKqe uvicorn app.main:app --host 0.0.0.0 --port 8000  
-
-
-fuser -k 8000/tcp || true; cd /opt/web && . .venv/bin/activate && APP_ENC_MASTER_KEY=IExFkb0be89F8dmUFK4pLTBoIwjFi8nv APP_ADMIN_SECRET=y2oW3usi55pHCMvHIy3sEKqe uvicorn app.main:app --host 0.0.0.0 --port 8000
-
+fuser -k 8000/tcp || true; cd /opt/web && . .venv/bin/activate && APP_ENC_MASTER_KEY=IExFkb0be89F8dmUFK4pLTBoIwjFi8nv APP_ADMIN_SECRET=y2oW3usi55pHCMvHIy3sEKqe uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload --reload-dir /opt/web

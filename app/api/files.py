@@ -27,6 +27,20 @@ def get_file_service() -> FileService:
     return FileService()
 
 
+@router.get("/dedup/md5", summary="按MD5查重（存在则返回样本列表）")
+async def dedup_by_md5(
+    md5: str = Query(..., min_length=16, max_length=64, description="文件MD5"),
+    sample_limit: int = Query(5, ge=1, le=20, description="返回样本条数上限"),
+    file_service: FileService = Depends(get_file_service),
+    current_user: dict = Depends(get_current_user),
+):
+    try:
+        files = file_service.get_files_by_md5(md5.strip(), sample_limit)
+        return {"exists": len(files) > 0, "count": len(files), "samples": files}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"dedup_md5_failed: {str(e)}")
+
+
 @router.get("/list", response_model=FileListResponse, summary="获取文件列表")
 async def get_file_list(
     page: int = Query(1, ge=1, description="页码，从1开始"),

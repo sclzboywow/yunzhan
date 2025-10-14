@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Optional
 import json
+import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import JSONResponse
@@ -15,6 +16,7 @@ from app.services.mcp_client import get_netdisk_client
 
 
 router = APIRouter(prefix="/mcp", tags=["mcp"])
+logger = logging.getLogger(__name__)
 
 
 @router.get("/user/quota")
@@ -348,12 +350,67 @@ def public_exec(payload: dict, current: User = Depends(get_current_user), db: Se
     if op not in ALLOWED_OPS:
         return JSONResponse({"status": "error", "error": "op_not_allowed", "op": op}, status_code=400)
     try:
+        # temporary debug: safe args preview (avoid sensitive fields)
+        def _safe_args_preview(d: dict) -> dict:
+            keys = {
+                "dir", "dir_path", "filename", "url", "remote_path", "local_file_path",
+                "url_list", "text_list", "file_list", "fsids", "fsid_list", "path", "key"
+            }
+            return {k: d.get(k) for k in keys if k in d}
+
+        logger.info(f"mcp.public op=%s user=%s args=%s", op, current.username, _safe_args_preview(args))
+        # ---- Upload directory enforcement ----
+        def _path_starts_with_user_upload(p: str | None) -> bool:
+            if not p:
+                return False
+            try:
+                s = str(p)
+            except Exception:
+                return False
+            s = s.strip()
+            return s == "/用户上传" or s.startswith("/用户上传/")
+
+        def _enforce_upload_dir(op_name: str, op_args: dict) -> None:
+            # Only enforce for upload ops
+            if op_name in {"upload_url"}:
+                if not _path_starts_with_user_upload(op_args.get("dir") or op_args.get("dir_path")):
+                    raise HTTPException(status_code=400, detail="upload_dir_not_allowed")
+            if op_name in {"upload_text"}:
+                if not _path_starts_with_user_upload(op_args.get("dir")):
+                    raise HTTPException(status_code=400, detail="upload_dir_not_allowed")
+            if op_name in {"upload_local"}:
+                if not _path_starts_with_user_upload(op_args.get("remote_path")):
+                    raise HTTPException(status_code=400, detail="upload_dir_not_allowed")
+            if op_name in {"upload_batch_url"}:
+                items = op_args.get("url_list") or []
+                for it in items:
+                    if not _path_starts_with_user_upload((it or {}).get("dir_path")):
+                        raise HTTPException(status_code=400, detail="upload_dir_not_allowed")
+            if op_name in {"upload_batch_text"}:
+                items = op_args.get("text_list") or []
+                for it in items:
+                    if not _path_starts_with_user_upload((it or {}).get("dir")):
+                        raise HTTPException(status_code=400, detail="upload_dir_not_allowed")
+            if op_name in {"upload_batch_local"}:
+                items = op_args.get("file_list") or []
+                for it in items:
+                    if not _path_starts_with_user_upload((it or {}).get("remote_path")):
+                        raise HTTPException(status_code=400, detail="upload_dir_not_allowed")
+
+        if op.startswith("upload_"):
+            _enforce_upload_dir(op, args)
+
         # Charge quota for public-mode operations too, except for space quota queries
         CHARGE_OPS = {"download_ticket", "share_create", "file_metas"}
         if op in CHARGE_OPS:
             check_and_consume_quota(current, db)
         client = get_netdisk_client(mode="public")
-        data = _exec_with_client(op, args, client)
+        try:
+            data = _exec_with_client(op, args, client)
+            logger.info(f"mcp.public result op=%s status=ok", op)
+        except Exception as e:
+            logger.error("mcp.public result op=%s error=%s", op, e)
+            raise
         return JSONResponse({"status": "ok", "data": data})
     except NotImplementedError:
         return JSONResponse({"status": "error", "error": "op_not_implemented", "op": op}, status_code=400)
@@ -395,9 +452,61 @@ def user_exec(payload: dict, current: User = Depends(get_current_user), db: Sess
         except Exception as _e:
             # bubble up HTTPException if any
             raise
+    # temporary debug: safe args preview
+    def _safe_args_preview_user(d: dict) -> dict:
+        keys = {
+            "dir", "dir_path", "filename", "url", "remote_path", "local_file_path",
+            "url_list", "text_list", "file_list", "fsids", "fsid_list", "path", "key"
+        }
+        return {k: d.get(k) for k in keys if k in d}
+    logger.info("mcp.user op=%s user=%s args=%s", op, current.username, _safe_args_preview_user(args))
+    # Enforce upload directory for user mode as well
+    if op.startswith("upload_"):
+        def _path_starts_with_user_upload(p: str | None) -> bool:
+            if not p:
+                return False
+            try:
+                s = str(p)
+            except Exception:
+                return False
+            s = s.strip()
+            return s == "/用户上传" or s.startswith("/用户上传/")
+
+        def _enforce_upload_dir_user(op_name: str, op_args: dict) -> None:
+            if op_name in {"upload_url"}:
+                if not _path_starts_with_user_upload(op_args.get("dir") or op_args.get("dir_path")):
+                    raise HTTPException(status_code=400, detail="upload_dir_not_allowed")
+            if op_name in {"upload_text"}:
+                if not _path_starts_with_user_upload(op_args.get("dir")):
+                    raise HTTPException(status_code=400, detail="upload_dir_not_allowed")
+            if op_name in {"upload_local"}:
+                if not _path_starts_with_user_upload(op_args.get("remote_path")):
+                    raise HTTPException(status_code=400, detail="upload_dir_not_allowed")
+            if op_name in {"upload_batch_url"}:
+                items = op_args.get("url_list") or []
+                for it in items:
+                    if not _path_starts_with_user_upload((it or {}).get("dir_path")):
+                        raise HTTPException(status_code=400, detail="upload_dir_not_allowed")
+            if op_name in {"upload_batch_text"}:
+                items = op_args.get("text_list") or []
+                for it in items:
+                    if not _path_starts_with_user_upload((it or {}).get("dir")):
+                        raise HTTPException(status_code=400, detail="upload_dir_not_allowed")
+            if op_name in {"upload_batch_local"}:
+                items = op_args.get("file_list") or []
+                for it in items:
+                    if not _path_starts_with_user_upload((it or {}).get("remote_path")):
+                        raise HTTPException(status_code=400, detail="upload_dir_not_allowed")
+
+        _enforce_upload_dir_user(op, args)
     try:
         client = get_netdisk_client(user_id=current.id, mode="user")
-        data = _exec_with_client(op, args, client)
+        try:
+            data = _exec_with_client(op, args, client)
+            logger.info("mcp.user result op=%s status=ok", op)
+        except Exception as e:
+            logger.error("mcp.user result op=%s error=%s", op, e)
+            raise
         return JSONResponse({"status": "ok", "data": data})
     except NotImplementedError:
         return JSONResponse({"status": "error", "error": "op_not_implemented", "op": op}, status_code=400)

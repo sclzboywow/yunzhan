@@ -130,13 +130,13 @@ class FileService:
                 total_files, total_size = cursor.fetchone()
                 total_size = total_size or 0
                 
-                # 按类别统计
-                cursor.execute("SELECT category, COUNT(*) FROM exported_files GROUP BY category")
-                category_stats = {row[0]: row[1] for row in cursor.fetchall()}
+                # 按类别统计（将 NULL 归一到 -1）
+                cursor.execute("SELECT COALESCE(category, -1) AS category, COUNT(*) FROM exported_files GROUP BY COALESCE(category, -1)")
+                category_stats = {int(row[0]): int(row[1]) for row in cursor.fetchall()}
                 
-                # 按状态统计
-                cursor.execute("SELECT status, COUNT(*) FROM exported_files GROUP BY status")
-                status_stats = {row[0]: row[1] for row in cursor.fetchall()}
+                # 按状态统计（将 NULL 归一到 'unknown'）
+                cursor.execute("SELECT COALESCE(status, 'unknown') AS status, COUNT(*) FROM exported_files GROUP BY COALESCE(status, 'unknown')")
+                status_stats = {str(row[0]): int(row[1]) for row in cursor.fetchall()}
                 
                 # 按路径统计（前10个）
                 cursor.execute("""
@@ -236,4 +236,135 @@ class FileService:
                 
         except Exception as e:
             logger.error(f"搜索文件失败: {e}")
+            raise
+
+    def get_files_by_md5(self, file_md5: str, limit: int = 10) -> List[FileInfo]:
+        """按 MD5 查找文件，返回最多 limit 条样本。"""
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    """
+                    SELECT id, file_name, file_path, file_size, fs_id, create_time,
+                           modify_time, file_md5, category, sync_id, status, export_time
+                    FROM exported_files
+                    WHERE lower(trim(file_md5)) = lower(trim(?))
+                    ORDER BY id DESC
+                    LIMIT ?
+                    """,
+                    (file_md5, limit),
+                )
+
+                files: List[FileInfo] = []
+                for row in cursor.fetchall():
+                    files.append(
+                        FileInfo(
+                            id=row["id"],
+                            file_name=row["file_name"],
+                            file_path=row["file_path"],
+                            file_size=row["file_size"],
+                            fs_id=row["fs_id"],
+                            create_time=row["create_time"],
+                            modify_time=row["modify_time"],
+                            file_md5=row["file_md5"],
+                            category=row["category"],
+                            sync_id=row["sync_id"],
+                            status=row["status"],
+                            export_time=row["export_time"],
+                        )
+                    )
+                return files
+        except Exception as e:
+            logger.error(f"按MD5查询失败: {e}")
+            raise
+
+    def has_md5(self, file_md5: str) -> int:
+        """返回具有该 MD5 的文件数量（用于快速查重）。"""
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT COUNT(*) FROM exported_files WHERE lower(trim(file_md5)) = lower(trim(?))", (file_md5,))
+                cnt = cursor.fetchone()[0]
+                return int(cnt or 0)
+        except Exception as e:
+            logger.error(f"MD5计数失败: {e}")
+            raise
+
+    def upsert_exported_file(
+        self,
+        *,
+        file_name: str,
+        file_path: str,
+        file_size: int | None = None,
+        fs_id: int | None = None,
+        file_md5: str | None = None,
+        create_time: float | None = None,
+        modify_time: float | None = None,
+        category: int | None = None,
+        status: str | None = "indexed",
+    ) -> None:
+        """将（或更新）一条文件记录写入 exported_files。
+
+        依据 (file_path, fs_id) 做幂等写入；若 fs_id 为空，则仅以 file_path 去重（可能产生多条，取决于调用方）。
+        """
+        try:
+            with self._get_connection() as conn:
+                cur = conn.cursor()
+                # 先尝试按 (file_path, fs_id) 查是否存在
+                if fs_id is not None:
+                    cur.execute(
+                        "SELECT id FROM exported_files WHERE file_path=? AND fs_id=?",
+                        (file_path, fs_id),
+                    )
+                    row = cur.fetchone()
+                    if row:
+                        # 更新可能为空的字段
+                        cur.execute(
+                            """
+                            UPDATE exported_files
+                            SET file_name = COALESCE(?, file_name),
+                                file_size = COALESCE(?, file_size),
+                                file_md5 = COALESCE(?, file_md5),
+                                create_time = COALESCE(?, create_time),
+                                modify_time = COALESCE(?, modify_time),
+                                category = COALESCE(?, category),
+                                status = COALESCE(?, status)
+                            WHERE id = ?
+                            """,
+                            (
+                                file_name,
+                                file_size,
+                                file_md5,
+                                create_time,
+                                modify_time,
+                                category,
+                                status,
+                                row[0],
+                            ),
+                        )
+                        conn.commit()
+                        return
+                # 插入新记录
+                cur.execute(
+                    """
+                    INSERT INTO exported_files (
+                        file_name, file_path, file_size, fs_id,
+                        create_time, modify_time, file_md5, category, status
+                    ) VALUES (?,?,?,?,?,?,?,?,?)
+                    """,
+                    (
+                        file_name,
+                        file_path,
+                        file_size,
+                        fs_id,
+                        create_time,
+                        modify_time,
+                        file_md5,
+                        category,
+                        status,
+                    ),
+                )
+                conn.commit()
+        except Exception as e:
+            logger.error(f"upsert_exported_file 失败: {e}")
             raise

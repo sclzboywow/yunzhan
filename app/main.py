@@ -71,6 +71,7 @@ from app.api.oauth import router as oauth_router
 from app.api.admin import router as admin_router
 from app.api.quota import router as quota_router
 from app.api.reports import router as reports_router
+from app.api.upload import router as upload_router
 
 
 app.include_router(mcp_router)
@@ -78,6 +79,7 @@ app.include_router(oauth_router)
 app.include_router(admin_router)
 app.include_router(quota_router)
 app.include_router(reports_router)
+app.include_router(upload_router)
 
 # ---- Files wiring ----
 from app.api.files import router as files_router
