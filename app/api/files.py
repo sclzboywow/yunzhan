@@ -8,6 +8,7 @@ from fastapi.responses import StreamingResponse, Response
 from app.models.file import FileListRequest, FileListResponse, FileStatsResponse, FileInfo
 from app.services.file_service import FileService
 from app.deps.auth import get_current_user
+from app.deps.quota import quota_guard
 from app.core.config import settings
 
 import requests
@@ -287,7 +288,8 @@ async def proxy_download(
 async def get_file_detail(
     file_id: int,
     file_service: FileService = Depends(get_file_service),
-    current_user: dict = Depends(get_current_user)
+    current_user: dict = Depends(get_current_user),
+    _q = Depends(quota_guard),
 ):
     """
     根据文件ID获取文件详细信息

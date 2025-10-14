@@ -15,6 +15,8 @@ class User(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
     username: Mapped[str] = mapped_column(String(64), unique=True, index=True, nullable=False)
     password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
+    # 用户角色：basic|premium，默认 basic
+    role: Mapped[str] = mapped_column(String(16), nullable=False, default="basic", index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
 

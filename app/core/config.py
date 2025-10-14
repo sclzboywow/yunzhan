@@ -29,6 +29,10 @@ class Settings(BaseSettings):
     # Admin
     admin_secret: str = "change-admin"
 
+    # Shared daily quota by role (read/download/share share the same pool)
+    daily_quota_basic: int = 10
+    daily_quota_premium: int = 100
+
     # MCP/Netdisk
     baidu_access_token: str | None = None
     mcp_base_path: str = "/opt/web/@netdisk/mcp/netdisk-mcp-server-stdio"

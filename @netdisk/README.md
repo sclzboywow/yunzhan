@@ -880,6 +880,49 @@ POST /mcp/public/exec
 - `APP_ADMIN_SECRET`：管理口令（如 WS 广播、服务态流程）。
 - `APP_BAIDU_APP_ID`：分享接口所需 appid。
 
+#### 配额与角色（新增）
+- `APP_DAILY_QUOTA_BASIC`：普通用户每日总额度（阅读/下载/分享共用），默认 10。
+- `APP_DAILY_QUOTA_PREMIUM`：高级用户每日总额度，默认 100。
+
+说明：阅读、下载、分享每次均计 1 次，三者共用“每日总额度”。超额后相关接口返回 429（`daily_quota_exceeded`）。
+
+角色设置：
+```bash
+curl -X POST "http://127.0.0.1:8000/auth/set_role?username=<USER>&role=premium&admin_secret=<ADMIN>"
+```
+
+配额管理：
+- 查询：
+```bash
+curl "http://127.0.0.1:8000/admin/quota?username=<USER>&admin_secret=<ADMIN>"
+```
+- 重置（指定日期或全部）：
+```bash
+curl -X POST "http://127.0.0.1:8000/admin/quota/reset?username=<USER>&day=2025-10-14&admin_secret=<ADMIN>"
+curl -X POST "http://127.0.0.1:8000/admin/quota/reset?username=<USER>&admin_secret=<ADMIN>"
+```
+
+用户自查今日配额（用户态）：
+
+- 接口：`GET /quota/today`（需登录）
+- 示例：
+```bash
+curl -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:8000/quota/today"
+```
+- 返回：
+```json
+{
+  "status": "ok",
+  "data": {
+    "day": "2025-10-14",
+    "role": "basic",
+    "used": 3,
+    "total": 10,
+    "left": 7
+  }
+}
+```
+
 ### 已处理的文档问题
 - Swagger 警告 `Duplicate Operation ID me_auth_me_get`：已移除重复路由（`app/api/auth.py` 中的占位 `/auth/me`）。
 
@@ -951,15 +994,55 @@ POST /mcp/public/exec
 | 50002 | 播单id不存在 | 异常处理 或者 获取正确的播单id |
 
 
----
-来源（MCP 压缩包）： 
+### 公共资源举报（新增）
+
+- 说明：用于举报公共资源（如分享短链/文件）。系统记录举报人用户名、时间、原因，并累计被举报次数。
+- 去重与风控：
+  - 同一用户对同一 target 每天只计一次
+  - 单用户每日上限：3 次（超限返回 429 `report_daily_limit`）
+  - 最小时间间隔：10 秒（过快返回 429 `report_too_frequent`）
+
+- 提交举报（需登录）
+```bash
+curl -X POST \
+  -H "Authorization: Bearer $TOKEN" \
+  "http://127.0.0.1:8000/reports/public?target=<TARGET_ID>&reason=<REASON>"
+# 返回
+{
+  "status": "ok",
+  "data": { "reported": true, "target": "<TARGET_ID>", "count": 5 }
+}
+```
+
+- 查询被举报次数（公开）
+```bash
+curl "http://127.0.0.1:8000/reports/public/count?target=<TARGET_ID>"
+# 返回
+{
+  "status": "ok",
+  "data": { "target": "<TARGET_ID>", "count": 5 }
+}
+```
+
+- 字段约定：
+  - `target`：被举报对象标识（fsid，便于定位）
+  - `reason`：举报原因（简述；前端可提供常用原因选项并限制长度）
+
+
 
 
 ---
 来源（MCP 压缩包）： 
 
+
+增加每日次数：
+sqlite3 /opt/web/app_data/app.sqlite3 "INSERT INTO usage_quota (user_id, day, total_count) SELECT id, date('now'), 0 FROM users WHERE username='user_3238730176_41870c28' AND NOT EXISTS (SELECT 1 FROM usage_quota WHERE user_id=users.id AND day=date('now')); UPDATE usage_quota SET total_count = CASE WHEN total_count >= 10 THEN total_count - 10 ELSE 0 END WHERE user_id = (SELECT id FROM users WHERE username='user_3238730176_41870c28') AND day = date('now');"
 
 
 热重载
 
 cd /opt/web && . .venv/bin/activate && APP_ENC_MASTER_KEY=IExFkb0be89F8dmUFK4pLTBoIwjFi8nv APP_ADMIN_SECRET=y2oW3usi55pHCMvHIy3sEKqe uvicorn app.main:app --host 0.0.0.0 --port 8000  
+
+
+fuser -k 8000/tcp || true; cd /opt/web && . .venv/bin/activate && APP_ENC_MASTER_KEY=IExFkb0be89F8dmUFK4pLTBoIwjFi8nv APP_ADMIN_SECRET=y2oW3usi55pHCMvHIy3sEKqe uvicorn app.main:app --host 0.0.0.0 --port 8000
+

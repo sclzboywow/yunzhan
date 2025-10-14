@@ -8,6 +8,9 @@ from fastapi.responses import JSONResponse
 
 from app.deps.auth import get_current_user
 from app.models.user import User
+from app.deps.quota import check_and_consume_quota
+from app.core.db import get_db
+from sqlalchemy.orm import Session
 from app.services.mcp_client import get_netdisk_client
 
 
@@ -339,12 +342,16 @@ def _exec_with_client(op: str, args: dict, client) -> dict:
 
 
 @router.post("/public/exec")
-def public_exec(payload: dict, current: User = Depends(get_current_user)) -> JSONResponse:
+def public_exec(payload: dict, current: User = Depends(get_current_user), db: Session = Depends(get_db)) -> JSONResponse:
     op = str(payload.get("op", "")).strip()
     args = payload.get("args") or {}
     if op not in ALLOWED_OPS:
         return JSONResponse({"status": "error", "error": "op_not_allowed", "op": op}, status_code=400)
     try:
+        # Charge quota for public-mode operations too, except for space quota queries
+        CHARGE_OPS = {"download_ticket", "share_create", "file_metas"}
+        if op in CHARGE_OPS:
+            check_and_consume_quota(current, db)
         client = get_netdisk_client(mode="public")
         data = _exec_with_client(op, args, client)
         return JSONResponse({"status": "ok", "data": data})
@@ -374,11 +381,20 @@ def public_exec(payload: dict, current: User = Depends(get_current_user)) -> JSO
 
 
 @router.post("/user/exec")
-def user_exec(payload: dict, current: User = Depends(get_current_user)) -> JSONResponse:
+def user_exec(payload: dict, current: User = Depends(get_current_user), db: Session = Depends(get_db)) -> JSONResponse:
     op = str(payload.get("op", "")).strip()
     args = payload.get("args") or {}
     if op not in ALLOWED_OPS:
         return JSONResponse({"status": "error", "error": "op_not_allowed", "op": op}, status_code=400)
+    # Only charge quota for counting operations; do NOT count space quota refresh
+    CHARGE_OPS = {"download_ticket", "share_create", "file_metas"}
+    if op in CHARGE_OPS:
+        # consume 1 from shared daily quota
+        try:
+            check_and_consume_quota(current, db)
+        except Exception as _e:
+            # bubble up HTTPException if any
+            raise
     try:
         client = get_netdisk_client(user_id=current.id, mode="user")
         data = _exec_with_client(op, args, client)

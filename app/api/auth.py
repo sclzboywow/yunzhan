@@ -8,6 +8,7 @@ from app.core.db import Base, engine, get_db
 from app.core.security import create_access_token, hash_password, verify_password
 from app.models.user import User
 from app.schemas.auth import LoginRequest, RegisterRequest, TokenResponse, UserOut
+from app.core.config import settings
 
 
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -37,5 +38,21 @@ def login(payload: LoginRequest, db: Session = Depends(get_db)) -> TokenResponse
         raise HTTPException(status_code=400, detail="invalid username or password")
     token = create_access_token(user.id)
     return TokenResponse(access_token=token)
+
+
+@router.post("/set_role")
+def set_role(username: str, role: str, admin_secret: str, db: Session = Depends(get_db)) -> dict:
+    if admin_secret != settings.admin_secret:
+        raise HTTPException(status_code=401, detail="invalid admin_secret")
+    role_norm = role.lower().strip()
+    if role_norm not in {"basic", "premium"}:
+        raise HTTPException(status_code=400, detail="invalid_role")
+    user = db.execute(select(User).where(User.username == username)).scalar_one_or_none()
+    if user is None:
+        raise HTTPException(status_code=404, detail="user_not_found")
+    user.role = role_norm
+    db.add(user)
+    db.commit()
+    return {"status": "ok", "username": username, "role": role_norm}
 
 
