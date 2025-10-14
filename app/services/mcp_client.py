@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import tempfile
+import time
 
 from openapi_client import ApiClient, Configuration
 from openapi_client.api.userinfo_api import UserinfoApi
@@ -305,6 +306,132 @@ class NetdiskClient:
                 os.unlink(tmp_path)
             except Exception:
                 pass
+
+    # ---- 离线下载功能 ----
+    def offline_add(self, url: str, save_path: str = "/", filename: str | None = None) -> Dict[str, Any]:
+        """添加离线下载任务
+        
+        Args:
+            url: 下载链接
+            save_path: 保存路径
+            filename: 文件名（可选）
+        """
+        try:
+            import requests
+        except Exception:
+            return {"status": "error", "error": "requests_not_installed"}
+        
+        # 构建请求参数
+        params = {
+            "method": "add_task",
+            "access_token": self._access_token,
+            "url": url,
+            "save_path": save_path,
+        }
+        
+        if filename:
+            params["filename"] = filename
+        
+        # 调用百度网盘离线下载API
+        try:
+            response = requests.post(
+                "https://pan.baidu.com/rest/2.0/xpan/offline",
+                params=params,
+                timeout=30
+            )
+            response.raise_for_status()
+            result = response.json()
+            
+            # 检查百度网盘API返回的错误码
+            if isinstance(result, dict) and "errno" in result:
+                errno = result.get("errno", 0)
+                if errno != 0:
+                    error_msg = result.get("errmsg", "未知错误")
+                    return {"status": "error", "error": f"百度网盘API错误 {errno}: {error_msg}"}
+            
+            return result
+        except Exception as e:
+            return {"status": "error", "error": f"offline_add_failed: {str(e)}"}
+
+    def offline_status(self, task_id: str | None = None) -> Dict[str, Any]:
+        """查询离线下载任务状态
+        
+        Args:
+            task_id: 任务ID，如果为None则查询所有任务
+        """
+        try:
+            import requests
+        except Exception:
+            return {"status": "error", "error": "requests_not_installed"}
+        
+        # 构建请求参数
+        params = {
+            "method": "query_task",
+            "access_token": self._access_token,
+        }
+        
+        if task_id:
+            params["task_id"] = task_id
+        
+        # 调用百度网盘离线下载API
+        try:
+            response = requests.post(
+                "https://pan.baidu.com/rest/2.0/xpan/offline",
+                params=params,
+                timeout=30
+            )
+            response.raise_for_status()
+            result = response.json()
+            
+            # 检查百度网盘API返回的错误码
+            if isinstance(result, dict) and "errno" in result:
+                errno = result.get("errno", 0)
+                if errno != 0:
+                    error_msg = result.get("errmsg", "未知错误")
+                    return {"status": "error", "error": f"百度网盘API错误 {errno}: {error_msg}"}
+            
+            return result
+        except Exception as e:
+            return {"status": "error", "error": f"offline_status_failed: {str(e)}"}
+
+    def offline_cancel(self, task_id: str) -> Dict[str, Any]:
+        """取消离线下载任务
+        
+        Args:
+            task_id: 任务ID
+        """
+        try:
+            import requests
+        except Exception:
+            return {"status": "error", "error": "requests_not_installed"}
+        
+        # 构建请求参数
+        params = {
+            "method": "cancel_task",
+            "access_token": self._access_token,
+            "task_id": task_id,
+        }
+        
+        # 调用百度网盘离线下载API
+        try:
+            response = requests.post(
+                "https://pan.baidu.com/rest/2.0/xpan/offline",
+                params=params,
+                timeout=30
+            )
+            response.raise_for_status()
+            result = response.json()
+            
+            # 检查百度网盘API返回的错误码
+            if isinstance(result, dict) and "errno" in result:
+                errno = result.get("errno", 0)
+                if errno != 0:
+                    error_msg = result.get("errmsg", "未知错误")
+                    return {"status": "error", "error": f"百度网盘API错误 {errno}: {error_msg}"}
+            
+            return result
+        except Exception as e:
+            return {"status": "error", "error": f"offline_cancel_failed: {str(e)}"}
 
 
 def get_netdisk_client(access_token: Optional[str] = None, user_id: Optional[int] = None, mode: str = "user") -> NetdiskClient:

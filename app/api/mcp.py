@@ -89,6 +89,10 @@ ALLOWED_OPS: set[str] = {
     "file_metas",
     "download_links",
     "share_create",
+    # 离线下载
+    "offline_add",
+    "offline_status",
+    "offline_cancel",
 }
 
 
@@ -236,7 +240,8 @@ def _exec_with_client(op: str, args: dict, client) -> dict:
             parsed = fsids_val
         return client.download_links(parsed)
     if op == "share_create":
-        fsids_val = args.get("fsid_list", "[]")
+        # 支持两种参数名：fsid_list 和 fsids
+        fsids_val = args.get("fsid_list") or args.get("fsids", "[]")
         try:
             fsid_list = json.loads(fsids_val) if isinstance(fsids_val, str) else fsids_val
         except Exception:
@@ -246,6 +251,22 @@ def _exec_with_client(op: str, args: dict, client) -> dict:
         remark = args.get("remark")
         ticket = args.get("ticket")
         return client.create_share_link(fsid_list=fsid_list, period=period, pwd=pwd, remark=remark, ticket=ticket)
+    
+    # 离线下载功能
+    if op == "offline_add":
+        url = str(args.get("url", ""))
+        save_path = str(args.get("save_path", "/"))
+        filename = args.get("filename")
+        return client.offline_add(url=url, save_path=save_path, filename=filename)
+    
+    if op == "offline_status":
+        task_id = args.get("task_id")
+        return client.offline_status(task_id=task_id)
+    
+    if op == "offline_cancel":
+        task_id = str(args.get("task_id", ""))
+        return client.offline_cancel(task_id=task_id)
+    
     # 其他操作待逐步对接 openapi_client 具体方法
     raise NotImplementedError(op)
 
