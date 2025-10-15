@@ -1247,3 +1247,18 @@ CREATE TABLE update_checks (
 热重载
 
 fuser -k 8000/tcp || true; cd /opt/web && . .venv/bin/activate && APP_ENC_MASTER_KEY=IExFkb0be89F8dmUFK4pLTBoIwjFi8nv APP_ADMIN_SECRET=y2oW3usi55pHCMvHIy3sEKqe uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload --reload-dir /opt/web
+
+
+常驻服务器
+
+当前状态: active (running)
+进程: gunicorn 托管 uvicorn，监听 0.0.0.0:8000
+服务名: netdisk
+常用命令：
+查看状态: sudo systemctl status netdisk
+实时日志: sudo journalctl -u netdisk -f
+重启服务: sudo systemctl restart netdisk
+停止服务: sudo systemctl stop netdisk
+后续如需调整并发/端口，在 /opt/web/scripts/netdisk.service 或环境变量中修改 WORKERS/APP_PORT 后执行:
+sudo systemctl daemon-reload && sudo systemctl restart netdisk
+

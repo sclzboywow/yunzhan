@@ -1,0 +1,22 @@
+[Unit]
+Description=NetDisk FastAPI Service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/opt/web
+Environment=APP_ENC_MASTER_KEY=IExFkb0be89F8dmUFK4pLTBoIwjFi8nv
+Environment=APP_ADMIN_SECRET=y2oW3usi55pHCMvHIy3sEKqe
+Environment=APP_HOST=0.0.0.0
+Environment=APP_PORT=8000
+Environment=WORKERS=2
+Environment=TIMEOUT=120
+ExecStart=/bin/bash -lc '/opt/web/scripts/run_service.sh'
+Restart=always
+RestartSec=3
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target
