@@ -1050,6 +1050,200 @@ python /opt/web/scripts/refresh_md5.py --mode public --limit 1000 --batch-size 5
 
 
 
+## 前端更新检查功能
+
+### 🎯 功能概述
+
+基于FastAPI + SQLite技术栈实现的更新检查系统，支持版本检查、下载提示、强制更新等功能。
+
+**这不是热更新**，而是：
+- ✅ **版本检查**：检查是否有新版本可用
+- ✅ **下载提示**：提示用户下载新版本
+- ✅ **强制更新**：可设置强制用户更新
+- ❌ **不是热更新**：不会自动替换运行中的代码
+
+### 🚀 快速开始
+
+#### 1. 初始化数据库
+```bash
+cd /opt/web
+python scripts/init_update_tables.py
+```
+
+#### 2. 测试功能
+```bash
+python scripts/test_update_check.py
+```
+
+### 📡 API接口
+
+#### 检查更新（推荐使用GET方式）
+```bash
+# GET方式 - 最简单
+GET /update/check?client_version=1.0.0&client_platform=web
+
+# POST方式
+POST /update/check
+Content-Type: application/json
+{
+  "client_version": "1.0.0",
+  "client_platform": "web",
+  "user_agent": "Mozilla/5.0..."
+}
+```
+
+**响应示例：**
+```json
+{
+  "has_update": true,
+  "current_version": "1.0.0",
+  "latest_version": "1.1.0",
+  "latest_version_info": {
+    "version": "1.1.0",
+    "version_code": 10100,
+    "platform": "web",
+    "release_notes": "新功能更新...",
+    "download_url": "https://example.com/downloads/app-v1.1.0.zip",
+    "file_size": 52428800,
+    "file_hash": "sha256:def456ghi789",
+    "is_force_update": false,
+    "is_latest": true,
+    "created_at": "2024-01-01T00:00:00Z"
+  },
+  "force_update": false,
+  "message": "发现新版本"
+}
+```
+
+#### 其他接口
+- `GET /update/latest?platform=web` - 获取最新版本信息
+- `POST /update/versions` - 创建新版本（管理员）
+- `GET /update/status` - 服务状态
+
+### 🌐 前端调用示例
+
+#### 简单JavaScript调用
+```javascript
+// 检查更新
+async function checkUpdate() {
+  try {
+    const response = await fetch('http://localhost:8000/update/check?client_version=1.0.0&client_platform=web');
+    const data = await response.json();
+    
+    if (data.has_update) {
+      // 显示更新提示
+      alert(`发现新版本 ${data.latest_version}！\n${data.message}`);
+      
+      if (data.latest_version_info?.download_url) {
+        // 打开下载链接
+        window.open(data.latest_version_info.download_url, '_blank');
+      }
+    } else {
+      console.log('当前已是最新版本');
+    }
+  } catch (error) {
+    console.error('检查更新失败:', error);
+  }
+}
+
+// 页面加载时检查更新
+checkUpdate();
+```
+
+#### 定时检查
+```javascript
+// 每30分钟检查一次更新
+setInterval(async () => {
+  try {
+    const response = await fetch('http://localhost:8000/update/check?client_version=1.0.0&client_platform=web');
+    const data = await response.json();
+    
+    if (data.has_update) {
+      showUpdateNotification(data);
+    }
+  } catch (error) {
+    console.error('检查更新失败:', error);
+  }
+}, 30 * 60 * 1000);
+```
+
+### 🔧 版本管理
+
+#### 创建新版本（管理员）
+```bash
+curl -X POST "http://localhost:8000/update/versions" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer YOUR_ADMIN_TOKEN" \
+  -d '{
+    "version": "1.2.0",
+    "version_code": 10200,
+    "platform": "web",
+    "release_notes": "新功能更新",
+    "download_url": "https://example.com/downloads/app-v1.2.0.zip",
+    "file_size": 52428800,
+    "file_hash": "sha256:abc123def456",
+    "is_force_update": false,
+    "is_latest": true
+  }'
+```
+
+#### 版本号规则
+- 使用语义化版本号：`x.y.z`
+- 版本代码计算：`x * 10000 + y * 100 + z`
+- 示例：1.0.0 → 10000, 1.1.0 → 10100, 2.0.0 → 20000
+
+### 📊 数据库表结构
+
+#### app_versions 表
+```sql
+CREATE TABLE app_versions (
+    id INTEGER PRIMARY KEY,
+    version VARCHAR(50) UNIQUE NOT NULL,
+    version_code INTEGER NOT NULL,
+    platform VARCHAR(20) NOT NULL,
+    release_notes TEXT,
+    download_url VARCHAR(500),
+    file_size INTEGER,
+    file_hash VARCHAR(128),
+    is_force_update BOOLEAN DEFAULT FALSE,
+    is_latest BOOLEAN DEFAULT FALSE,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+```
+
+#### update_checks 表
+```sql
+CREATE TABLE update_checks (
+    id INTEGER PRIMARY KEY,
+    client_version VARCHAR(50) NOT NULL,
+    client_platform VARCHAR(20) NOT NULL,
+    user_agent VARCHAR(500),
+    ip_address VARCHAR(45),
+    has_update BOOLEAN DEFAULT FALSE,
+    latest_version VARCHAR(50),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+```
+
+### 📝 使用流程
+
+1. **初始化数据库**：`python scripts/init_update_tables.py`
+2. **上传安装包**：到您的服务器或CDN
+3. **创建版本记录**：通过API或数据库
+4. **前端调用**：`/update/check` 检查更新
+5. **用户下载**：通过返回的 `download_url`
+
+### ⚠️ 注意事项
+
+1. **版本号管理**：确保版本号格式正确，版本代码计算准确
+2. **强制更新**：谨慎使用强制更新，避免影响用户体验
+3. **下载链接**：确保下载链接有效且可访问
+4. **错误处理**：前端应妥善处理网络错误和API错误
+5. **安全性**：版本管理API需要管理员权限保护
+
+---
+
 热重载
 
 fuser -k 8000/tcp || true; cd /opt/web && . .venv/bin/activate && APP_ENC_MASTER_KEY=IExFkb0be89F8dmUFK4pLTBoIwjFi8nv APP_ADMIN_SECRET=y2oW3usi55pHCMvHIy3sEKqe uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload --reload-dir /opt/web

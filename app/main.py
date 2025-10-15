@@ -85,3 +85,8 @@ app.include_router(upload_router)
 from app.api.files import router as files_router
 
 app.include_router(files_router)
+
+# ---- Update wiring ----
+from app.api.update import router as update_router
+
+app.include_router(update_router)
