@@ -242,6 +242,7 @@ POST /oauth/device/poll_auto?device_code=<DEVICE_CODE>&device_fingerprint=<FINGE
   "user_id": 123,
   "username": "user_208281036_a1b2c3d4",
   "jwt_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
+  "refresh_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
   "baidu_token": "12.a6b7dbd428f731035f771b8d15063f61.86400.1292922000-2346678-124328",
   "user_info": {
     "uk": 208281036,
@@ -1261,4 +1262,161 @@ fuser -k 8000/tcp || true; cd /opt/web && . .venv/bin/activate && APP_ENC_MASTER
 停止服务: sudo systemctl stop netdisk
 后续如需调整并发/端口，在 /opt/web/scripts/netdisk.service 或环境变量中修改 WORKERS/APP_PORT 后执行:
 sudo systemctl daemon-reload && sudo systemctl restart netdisk
+
+## 🔐 JWT Token 刷新机制
+
+### 功能概述
+为了解决JWT token过期导致的502错误，系统现在支持token刷新机制：
+
+- **Access Token**: 24小时有效期，用于API访问
+- **Refresh Token**: 7天有效期，用于获取新的token对
+- **自动刷新**: 前端可以在token过期前自动刷新
+
+### API接口
+
+#### 1. 登录获取Token对
+
+**普通登录：**
+```bash
+POST /auth/login
+Content-Type: application/json
+
+{
+  "username": "your_username",
+  "password": "your_password"
+}
+```
+
+**响应:**
+```json
+{
+  "access_token": "eyJhbGciOiJIUzI1NiIs...",
+  "refresh_token": "eyJhbGciOiJIUzI1NiIs...",
+  "token_type": "bearer"
+}
+```
+
+**扫码登录：**
+```bash
+# 1. 启动扫码
+POST /oauth/device/start_auto
+
+# 2. 轮询授权状态
+POST /oauth/device/poll_auto?device_code=<DEVICE_CODE>&device_fingerprint=<FINGERPRINT>
+```
+
+**扫码登录响应:**
+```json
+{
+  "status": "success",
+  "user_id": 123,
+  "username": "user_208281036_a1b2c3d4",
+  "jwt_token": "eyJhbGciOiJIUzI1NiIs...",
+  "refresh_token": "eyJhbGciOiJIUzI1NiIs...",
+  "baidu_token": "12.a6b7dbd428f731035f771b8d15063f61...",
+  "user_info": {...}
+}
+```
+
+#### 2. 刷新Token
+```bash
+POST /auth/refresh
+Content-Type: application/json
+
+{
+  "refresh_token": "your_refresh_token"
+}
+```
+
+**响应:**
+```json
+{
+  "access_token": "eyJhbGciOiJIUzI1NiIs...",
+  "refresh_token": "eyJhbGciOiJIUzI1NiIs...",
+  "token_type": "bearer"
+}
+```
+
+### 前端集成示例
+
+```javascript
+class AuthManager {
+  constructor() {
+    this.accessToken = localStorage.getItem('access_token');
+    this.refreshToken = localStorage.getItem('refresh_token');
+  }
+
+  async login(username, password) {
+    const response = await fetch('/auth/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username, password })
+    });
+    
+    const data = await response.json();
+    this.accessToken = data.access_token;
+    this.refreshToken = data.refresh_token;
+    
+    localStorage.setItem('access_token', this.accessToken);
+    localStorage.setItem('refresh_token', this.refreshToken);
+  }
+
+  async refreshTokens() {
+    if (!this.refreshToken) throw new Error('No refresh token');
+    
+    const response = await fetch('/auth/refresh', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ refresh_token: this.refreshToken })
+    });
+    
+    const data = await response.json();
+    this.accessToken = data.access_token;
+    this.refreshToken = data.refresh_token;
+    
+    localStorage.setItem('access_token', this.accessToken);
+    localStorage.setItem('refresh_token', this.refreshToken);
+  }
+
+  async apiCall(url, options = {}) {
+    const headers = {
+      'Authorization': `Bearer ${this.accessToken}`,
+      ...options.headers
+    };
+
+    let response = await fetch(url, { ...options, headers });
+    
+    // 如果401，尝试刷新token
+    if (response.status === 401) {
+      await this.refreshTokens();
+      headers['Authorization'] = `Bearer ${this.accessToken}`;
+      response = await fetch(url, { ...options, headers });
+    }
+    
+    return response;
+  }
+}
+
+// 使用示例
+const auth = new AuthManager();
+
+// 登录
+await auth.login('username', 'password');
+
+// API调用（自动处理token刷新）
+const response = await auth.apiCall('/files/stats');
+const data = await response.json();
+```
+
+### 测试Token刷新
+```bash
+# 测试完整流程
+python scripts/test_token_refresh.py
+```
+
+### 注意事项
+- Refresh token有效期7天，过期后需要重新登录
+- 每次刷新都会生成新的token对，旧的token会失效
+- 建议在access token过期前30分钟自动刷新
+- 生产环境请修改JWT密钥配置
 

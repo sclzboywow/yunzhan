@@ -378,15 +378,17 @@ def device_poll_auto(device_code: str, device_fingerprint: str = None, db: Sessi
             # 保存token
             store.save_user_token(user_id, access_token, data.get("refresh_token"), data.get("expires_in"))
         
-        # 生成JWT token
-        from app.core.security import create_access_token
+        # 生成JWT token和refresh token
+        from app.core.security import create_access_token, create_refresh_token
         jwt_token = create_access_token(subject=str(user_id))
+        refresh_token = create_refresh_token(subject=str(user_id))
         
         return JSONResponse({
             "status": "success",
             "user_id": user_id,
             "username": username,
             "jwt_token": jwt_token,
+            "refresh_token": refresh_token,
             "baidu_token": access_token,
             "user_info": {
                 "uk": uk,

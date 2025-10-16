@@ -38,3 +38,27 @@ def decode_access_token(token: str) -> dict[str, Any]:
     return jwt.decode(token, settings.jwt_secret_key, algorithms=[settings.jwt_algorithm])
 
 
+def create_refresh_token(subject: str | int, expires_minutes: Optional[int] = None) -> str:
+    """创建刷新token，有效期更长"""
+    settings = get_settings()
+    # 刷新token有效期设为7天
+    expire_delta = timedelta(minutes=expires_minutes or (7 * 24 * 60))
+    now = datetime.now(tz=timezone.utc)
+    payload: dict[str, Any] = {
+        "sub": str(subject),
+        "iat": int(now.timestamp()),
+        "exp": int((now + expire_delta).timestamp()),
+        "type": "refresh"  # 标记为刷新token
+    }
+    return jwt.encode(payload, settings.jwt_secret_key, algorithm=settings.jwt_algorithm)
+
+
+def decode_refresh_token(token: str) -> dict[str, Any]:
+    """解码刷新token"""
+    settings = get_settings()
+    payload = jwt.decode(token, settings.jwt_secret_key, algorithms=[settings.jwt_algorithm])
+    if payload.get("type") != "refresh":
+        raise jwt.InvalidTokenError("Not a refresh token")
+    return payload
+
+

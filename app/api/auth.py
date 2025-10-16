@@ -5,9 +5,9 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.db import Base, engine, get_db
-from app.core.security import create_access_token, hash_password, verify_password
+from app.core.security import create_access_token, create_refresh_token, decode_refresh_token, hash_password, verify_password
 from app.models.user import User
-from app.schemas.auth import LoginRequest, RegisterRequest, TokenResponse, UserOut
+from app.schemas.auth import LoginRequest, RefreshTokenRequest, RegisterRequest, TokenResponse, UserOut
 from app.core.config import settings
 
 
@@ -36,8 +36,32 @@ def login(payload: LoginRequest, db: Session = Depends(get_db)) -> TokenResponse
     user = db.execute(select(User).where(User.username == payload.username)).scalar_one_or_none()
     if user is None or not verify_password(payload.password, user.password_hash):
         raise HTTPException(status_code=400, detail="invalid username or password")
-    token = create_access_token(user.id)
-    return TokenResponse(access_token=token)
+    access_token = create_access_token(user.id)
+    refresh_token = create_refresh_token(user.id)
+    return TokenResponse(access_token=access_token, refresh_token=refresh_token)
+
+
+@router.post("/refresh", response_model=TokenResponse)
+def refresh_token(payload: RefreshTokenRequest, db: Session = Depends(get_db)) -> TokenResponse:
+    """使用refresh token获取新的access token"""
+    try:
+        # 验证refresh token
+        payload_data = decode_refresh_token(payload.refresh_token)
+        user_id = int(payload_data.get("sub"))
+        
+        # 检查用户是否存在
+        user = db.execute(select(User).where(User.id == user_id)).scalar_one_or_none()
+        if user is None:
+            raise HTTPException(status_code=401, detail="User not found")
+        
+        # 生成新的token对
+        new_access_token = create_access_token(user.id)
+        new_refresh_token = create_refresh_token(user.id)
+        
+        return TokenResponse(access_token=new_access_token, refresh_token=new_refresh_token)
+        
+    except Exception as e:
+        raise HTTPException(status_code=401, detail="Invalid refresh token")
 
 
 @router.post("/set_role")
