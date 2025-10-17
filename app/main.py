@@ -90,3 +90,40 @@ app.include_router(files_router)
 from app.api.update import router as update_router
 
 app.include_router(update_router)
+
+# ---- Background maintenance (tickets GC) ----
+from datetime import datetime, timedelta
+from sqlalchemy import delete
+from app.core.db import SessionLocal
+from app.models.ticket import Ticket
+import asyncio
+
+
+async def _tickets_gc_loop() -> None:
+    """Periodic GC for expired/old consumed tickets."""
+    interval_seconds = 6 * 60 * 60  # every 6 hours
+    keep_days = 7
+    while True:
+        try:
+            cutoff = datetime.utcnow() - timedelta(days=keep_days)
+            with SessionLocal() as db:
+                db.execute(
+                    delete(Ticket).where(
+                        (Ticket.expires_at < datetime.utcnow()) |
+                        ((Ticket.consumed_at.isnot(None)) & (Ticket.consumed_at < cutoff))
+                    )
+                )
+                db.commit()
+        except Exception:
+            # best effort; avoid crashing loop
+            pass
+        await asyncio.sleep(interval_seconds)
+
+
+@app.on_event("startup")
+def _start_background_jobs() -> None:
+    try:
+        loop = asyncio.get_event_loop()
+        loop.create_task(_tickets_gc_loop())
+    except Exception:
+        pass

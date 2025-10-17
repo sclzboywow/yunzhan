@@ -36,7 +36,10 @@ class NetdiskClient:
             with SessionLocal() as db:
                 store = TokenStore(db)
                 token = store.ensure_fresh_access_token(user_id)
-                self._access_token = token or ""
+                # 用户态：必须拿到用户自己的百度token，禁止任何服务态/环境变量兜底
+                if not token:
+                    raise ValueError("user_baidu_token_missing")
+                self._access_token = token
         else:
             self._access_token = access_token or ""
         self._config = Configuration()

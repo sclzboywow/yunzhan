@@ -13,6 +13,9 @@ from app.deps.quota import check_and_consume_quota
 from app.core.db import get_db
 from sqlalchemy.orm import Session
 from app.services.mcp_client import get_netdisk_client
+from app.core.db import SessionLocal
+from app.models.ticket import Ticket
+from datetime import datetime, timedelta
 
 
 router = APIRouter(prefix="/mcp", tags=["mcp"])
@@ -310,14 +313,47 @@ def _exec_with_client(op: str, args: dict, client) -> dict:
                 return {"status": "error", "error": "dlink_not_found"}
 
         now = int(_time.time())
+        # 根据客户端模式标注票据作用域：public/user
+        try:
+            _mode = getattr(client, "_token_mode", "")
+            _scope = "public" if _mode == "public" else "user"
+        except Exception:
+            _scope = "user"
+        # 生成一次性票据ID（jti），用于后端去重与消费标记
+        try:
+            import uuid as _uuid
+            _jti = str(_uuid.uuid4())
+        except Exception:
+            _jti = str(now)
         payload = {
             "typ": "bd.dl.ticket",
             "dlink": dlink,
             "iat": now,
             "exp": now + ttl_seconds,
+            "scope": _scope,
+            "jti": _jti,
             # 可扩展字段，如文件名、fsid 等
         }
         token = _jwt.encode(payload, settings.jwt_secret_key, algorithm=settings.jwt_algorithm)
+        # 后端持久化票据，支持一次性与撤销管理
+        try:
+            expires_at = datetime.utcfromtimestamp(now) + timedelta(seconds=ttl_seconds)
+            with SessionLocal() as _db:
+                # 若存在同 jti 记录，避免重复插入
+                exists = _db.query(Ticket).filter(Ticket.jti == _jti).first()
+                if not exists:
+                    row = Ticket(
+                        jti=_jti,
+                        scope=_scope,
+                        user_id=getattr(getattr(client, "_user", None), "id", None),
+                        dlink=dlink,
+                        fsid=str(fsid) if fsid is not None else None,
+                        expires_at=expires_at,
+                    )
+                    _db.add(row)
+                    _db.commit()
+        except Exception as _e:
+            logger.warning("persist_ticket_failed jti=%s err=%s", _jti, _e)
         return {
             "status": "ok",
             "ticket": token,
@@ -401,7 +437,8 @@ def public_exec(payload: dict, current: User = Depends(get_current_user), db: Se
             _enforce_upload_dir(op, args)
 
         # Charge quota for public-mode operations too, except for space quota queries
-        CHARGE_OPS = {"download_ticket", "share_create", "file_metas"}
+        # 注意：download_ticket 改为在 /files/proxy_download 成功开始下载时计费
+        CHARGE_OPS = {"share_create", "file_metas"}
         if op in CHARGE_OPS:
             check_and_consume_quota(current, db)
         client = get_netdisk_client(mode="public")
@@ -443,15 +480,8 @@ def user_exec(payload: dict, current: User = Depends(get_current_user), db: Sess
     args = payload.get("args") or {}
     if op not in ALLOWED_OPS:
         return JSONResponse({"status": "error", "error": "op_not_allowed", "op": op}, status_code=400)
-    # Only charge quota for counting operations; do NOT count space quota refresh
-    CHARGE_OPS = {"download_ticket", "share_create", "file_metas"}
-    if op in CHARGE_OPS:
-        # consume 1 from shared daily quota
-        try:
-            check_and_consume_quota(current, db)
-        except Exception as _e:
-            # bubble up HTTPException if any
-            raise
+    # 用户态不计入日配额（download_ticket/share_create/file_metas 等均不扣减），
+    # 仅公共态在 /mcp/public/exec 中计费。
     # temporary debug: safe args preview
     def _safe_args_preview_user(d: dict) -> dict:
         keys = {

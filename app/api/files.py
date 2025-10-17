@@ -9,12 +9,19 @@ from app.models.file import FileListRequest, FileListResponse, FileStatsResponse
 from app.services.file_service import FileService
 from app.deps.auth import get_current_user
 from app.deps.quota import quota_guard
+from sqlalchemy import select, insert
+from sqlalchemy.orm import Session
+from app.core.db import get_db
+from app.models.user import User
+from app.models.usage_quota import UsageQuota
 from app.core.config import settings
 
 import requests
 import jwt
 import urllib.parse
 from app.core.db import SessionLocal
+from app.models.ticket import Ticket
+from datetime import datetime
 from app.services.token_store import TokenStore
 
 logger = logging.getLogger(__name__)
@@ -174,7 +181,8 @@ async def get_statuses(
 async def proxy_download(
     ticket: str = Query(..., description="download_ticket 签发的票据"),
     range_header: Optional[str] = Query(None, alias="range", description="可选 Range 请求头的值，用于断点续传"),
-    current_user: dict = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
 ):
     """
     校验票据，向百度直链发起请求并流式转发给前端。
@@ -192,6 +200,26 @@ async def proxy_download(
         dlink = payload.get("dlink")
         if not dlink:
             raise HTTPException(status_code=400, detail="dlink_missing_in_ticket")
+        scope = str(payload.get("scope", "user"))
+        jti = str(payload.get("jti", ""))
+        if not jti:
+            # 兼容旧票据：退化为无去重；但仍按 scope 控制token
+            jti = "legacy"
+
+        # 票据落库校验：存在、未过期、未消费
+        try:
+            with SessionLocal() as _db:
+                rec = _db.query(Ticket).filter(Ticket.jti == jti).first()
+                if rec is None:
+                    raise HTTPException(status_code=401, detail="ticket_not_found")
+                if rec.consumed_at is not None:
+                    raise HTTPException(status_code=403, detail="ticket_consumed")
+                if rec.expires_at <= datetime.utcnow():
+                    raise HTTPException(status_code=401, detail="ticket_expired")
+        except HTTPException:
+            raise
+        except Exception as _e:
+            logger.warning(f"ticket_db_check_failed jti={jti} err={_e}")
 
         # 组装请求头（支持 Range）
         # 默认尽量贴近百度网盘客户端
@@ -205,9 +233,27 @@ async def proxy_download(
         if range_header:
             headers["Range"] = range_header
 
+        # 根据作用域准备实际请求用的 dlink（公共态补齐服务 access_token）
+        dlink_effective = dlink
+        if scope == "public":
+            try:
+                with SessionLocal() as _db:
+                    store = TokenStore(_db)
+                    service_access = store.ensure_fresh_service_token() or ""
+                if service_access:
+                    urlp = urllib.parse.urlparse(dlink_effective)
+                    q = urllib.parse.parse_qs(urlp.query, keep_blank_values=True)
+                    if "access_token" not in q:
+                        q["access_token"] = [service_access]
+                        new_query = urllib.parse.urlencode({k: v[0] if isinstance(v, list) and v else v for k, v in q.items()}, doseq=True)
+                        dlink_effective = urllib.parse.urlunparse(urlp._replace(query=new_query))
+            except Exception:
+                # 忽略补参失败，保持原 dlink 尝试
+                pass
+
         # 使用流式请求到百度直链
         def do_request(hdrs: dict):
-            return requests.get(dlink, headers=hdrs, stream=True, timeout=30)
+            return requests.get(dlink_effective, headers=hdrs, stream=True, timeout=30)
 
         try:
             upstream = do_request(headers)
@@ -252,18 +298,35 @@ async def proxy_download(
                 if (not range_header) and parsed_err and parsed_err.get("error_code") == 31326:
                     retry_headers.setdefault("Range", "bytes=0-")
                 retry_headers.setdefault("Accept-Encoding", "identity")
-                # 若为 31045，尝试追加公共态 access_token 到 dlink 再重试
-                dlink_retry = dlink
+                # 针对不同作用域补充 access_token 后重试
+                dlink_retry = dlink_effective
                 try:
-                    if parsed_err and parsed_err.get("error_code") == 31045:
+                    if parsed_err:
+                        errc = parsed_err.get("error_code")
+                    else:
+                        errc = None
+                    # 用户态：仅在 31045 时追加用户 access_token
+                    if scope == "user" and errc == 31045:
                         with SessionLocal() as _db:
                             store = TokenStore(_db)
-                            access = store.ensure_fresh_service_token() or ""
-                        if access:
+                            user_access = store.ensure_fresh_access_token(getattr(current_user, "id", None)) or ""
+                        if user_access:
                             urlp = urllib.parse.urlparse(dlink_retry)
                             q = urllib.parse.parse_qs(urlp.query, keep_blank_values=True)
                             if "access_token" not in q:
-                                q["access_token"] = [access]
+                                q["access_token"] = [user_access]
+                                new_query = urllib.parse.urlencode({k: v[0] if isinstance(v, list) and v else v for k, v in q.items()}, doseq=True)
+                                dlink_retry = urllib.parse.urlunparse(urlp._replace(query=new_query))
+                    # 公共态：若 31064/31045 等鉴权失败，确保带上服务 access_token
+                    if scope == "public" and errc in {31064, 31045, 31326, None}:
+                        with SessionLocal() as _db:
+                            store = TokenStore(_db)
+                            service_access = store.ensure_fresh_service_token() or ""
+                        if service_access:
+                            urlp = urllib.parse.urlparse(dlink_retry)
+                            q = urllib.parse.parse_qs(urlp.query, keep_blank_values=True)
+                            if "access_token" not in q:
+                                q["access_token"] = [service_access]
                                 new_query = urllib.parse.urlencode({k: v[0] if isinstance(v, list) and v else v for k, v in q.items()}, doseq=True)
                                 dlink_retry = urllib.parse.urlunparse(urlp._replace(query=new_query))
                 except Exception:
@@ -273,6 +336,31 @@ async def proxy_download(
                     upstream = requests.get(dlink_retry, headers=retry_headers, stream=True, timeout=30)
                 except Exception as e:
                     raise HTTPException(status_code=502, detail=f"upstream_connect_failed_after_retry: {str(e)}")
+
+        # 若返回 200/206：认为真实开始下载；公共态按次计费，并将 jti 标记已消费（避免复用）
+        if upstream.status_code in (200, 206):
+            try:
+                if scope == "public":
+                    # 公共态：在此扣配额
+                    from app.deps.quota import check_and_consume_quota
+                    check_and_consume_quota(current_user, db)
+                # 票据消费标记
+                try:
+                    with SessionLocal() as _db:
+                        rec = _db.query(Ticket).filter(Ticket.jti == jti).first()
+                        if rec is not None and rec.consumed_at is None:
+                            rec.consumed_at = datetime.utcnow()
+                            _db.add(rec)
+                            _db.commit()
+                except Exception as _e:
+                    logger.warning(f"ticket_consume_mark_failed jti={jti} err={_e}")
+            except Exception:
+                # 如果计费失败（例如额度不足），直接返回 429，终止下载
+                try:
+                    upstream.close()
+                except Exception:
+                    pass
+                raise
 
         # 准备向前端转发的头
         forward_headers = {}
