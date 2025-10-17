@@ -228,6 +228,8 @@ async def proxy_download(
             "Accept": "*/*",
             "Connection": "keep-alive",
             "Referer": "https://pan.baidu.com/",
+            # 避免压缩导致的中间层改写与长度不一致问题
+            "Accept-Encoding": "identity",
         }
         # 允许通过 query param 传入 range=bytes=... 以兼容部分客户端不便设置请求头
         if range_header:
@@ -253,7 +255,8 @@ async def proxy_download(
 
         # 使用流式请求到百度直链
         def do_request(hdrs: dict):
-            return requests.get(dlink_effective, headers=hdrs, stream=True, timeout=30)
+            # 将超时从单值改为 (连接超时, 读取超时)
+            return requests.get(dlink_effective, headers=hdrs, stream=True, timeout=(10, 600))
 
         try:
             upstream = do_request(headers)
@@ -332,8 +335,8 @@ async def proxy_download(
                 except Exception:
                     pass
                 try:
-                    # 使用可能追加了 access_token 的 dlink 重试
-                    upstream = requests.get(dlink_retry, headers=retry_headers, stream=True, timeout=30)
+                    # 使用可能追加了 access_token 的 dlink 重试，放宽读取超时
+                    upstream = requests.get(dlink_retry, headers=retry_headers, stream=True, timeout=(10, 600))
                 except Exception as e:
                     raise HTTPException(status_code=502, detail=f"upstream_connect_failed_after_retry: {str(e)}")
 
@@ -372,7 +375,7 @@ async def proxy_download(
 
         # 构造生成器以逐块转发数据
         def iter_stream():
-            for chunk in upstream.iter_content(chunk_size=64 * 1024):
+            for chunk in upstream.iter_content(chunk_size=256 * 1024):
                 if chunk:
                     yield chunk
 
