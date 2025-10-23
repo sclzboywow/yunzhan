@@ -246,6 +246,24 @@ def service_token_masked(current: User = Depends(get_current_user), db: Session 
     })
 
 
+@router.get("/service/token/raw")
+def service_token_raw(admin_secret: str = Query(...), db: Session = Depends(get_db)) -> JSONResponse:
+    """Return unmasked service (public) token. Admin secret required."""
+    if admin_secret != get_settings().admin_secret:
+        raise HTTPException(status_code=401, detail="invalid admin_secret")
+    store = TokenStore(db)
+    tok = store.get_service_token()
+    if not tok:
+        return JSONResponse({"has_token": False})
+    access, refresh, expires_at = tok
+    return JSONResponse({
+        "has_token": True,
+        "access_token": access,
+        "refresh_token": refresh,
+        "expires_at": expires_at.isoformat() if expires_at else None,
+    })
+
+
 # ---- User token upsert (frontend provides user access/refresh) ----
 @router.post("/user/token/upsert")
 def user_token_upsert(
